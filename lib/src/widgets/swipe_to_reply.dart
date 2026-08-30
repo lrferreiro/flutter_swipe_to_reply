@@ -5,6 +5,10 @@ import 'package:flutter/services.dart';
 
 import '../enums/swipe_to_reply_direction.dart';
 
+/// Builds the indicator displayed behind the swiped child.
+///
+/// [progress] is clamped between `0` and `1`, while [direction] identifies the
+/// edge from which the indicator is revealed.
 typedef SwipeToReplyIndicatorBuilder =
     Widget Function(
       BuildContext context,
@@ -16,24 +20,61 @@ typedef SwipeToReplyIndicatorBuilder =
 ///
 /// The widget is intentionally generic: it does not know about chats,
 /// conversations, messages, or backends. It only exposes the gesture, animates
-/// the child, shows an indicator, and calls [onReply] once the gesture crosses
-/// [triggerDistance].
+/// the child, shows an indicator, and calls [onReply] when the gesture is
+/// released after crossing [triggerDistance].
 class SwipeToReply extends StatefulWidget {
+  /// The widget that responds to the horizontal swipe gesture.
   final Widget child;
+
+  /// The horizontal direction in which [child] can be swiped.
   final SwipeToReplyDirection direction;
+
+  /// Whether the swipe gesture is enabled.
   final bool enabled;
+
+  /// The distance that must be reached before a release triggers [onReply].
   final double triggerDistance;
+
+  /// The maximum distance through which [child] can be dragged.
   final double maxDragDistance;
+
+  /// Called after the pointer is released beyond [triggerDistance].
   final VoidCallback onReply;
+
+  /// Whether to emit light haptic feedback on each armed threshold crossing.
   final bool enableHapticFeedback;
+
+  /// Distance from the origin at which haptic feedback is armed again.
+  ///
+  /// After feedback has fired, moving back to this distance and crossing
+  /// [triggerDistance] again emits another haptic pulse without ending the
+  /// gesture. The default requires returning completely to the origin.
+  final double hapticRearmDistance;
+
+  /// Duration of the animation that returns [child] to its resting position.
   final Duration resetDuration;
+
+  /// Curve of the animation that returns [child] to its resting position.
   final Curve resetCurve;
+
+  /// Diameter of the default circular indicator.
   final double indicatorSize;
+
+  /// Margin around the default indicator.
   final EdgeInsetsGeometry indicatorMargin;
+
+  /// Background color of the default indicator.
+  ///
+  /// When omitted, the current theme's surface container color is used.
   final Color? indicatorBackgroundColor;
+
+  /// Icon displayed by the default indicator.
   final Widget indicatorIcon;
+
+  /// Optional builder that replaces the default indicator.
   final SwipeToReplyIndicatorBuilder? indicatorBuilder;
 
+  /// Creates a horizontal swipe-to-reply interaction around [child].
   const SwipeToReply({
     super.key,
     required this.child,
@@ -43,6 +84,7 @@ class SwipeToReply extends StatefulWidget {
     this.triggerDistance = 54,
     this.maxDragDistance = 78,
     this.enableHapticFeedback = true,
+    this.hapticRearmDistance = 0,
     this.resetDuration = const Duration(milliseconds: 170),
     this.resetCurve = Curves.easeOutCubic,
     this.indicatorSize = 34,
@@ -50,28 +92,33 @@ class SwipeToReply extends StatefulWidget {
     this.indicatorBackgroundColor,
     this.indicatorIcon = const Icon(Icons.reply),
     this.indicatorBuilder,
-  });
+  }) : assert(triggerDistance > 0),
+       assert(maxDragDistance >= triggerDistance),
+       assert(hapticRearmDistance >= 0),
+       assert(hapticRearmDistance < triggerDistance),
+       assert(indicatorSize > 0);
 
   @override
   State<SwipeToReply> createState() => SwipeToReplyState();
 }
 
+/// State maintained by [SwipeToReply] while a pointer gesture is active.
 class SwipeToReplyState extends State<SwipeToReply> {
-  double dragDistance = 0;
-  bool didTriggerHaptic = false;
-  bool dragging = false;
+  double _dragDistance = 0;
+  bool _didTriggerHaptic = false;
+  bool _dragging = false;
 
   @override
   Widget build(BuildContext context) {
-    final offset = dragDistance * widget.direction.multiplier;
-    final progress = (dragDistance / widget.triggerDistance).clamp(0.0, 1.0);
+    final offset = _dragDistance * widget.direction.multiplier;
+    final progress = (_dragDistance / widget.triggerDistance).clamp(0.0, 1.0);
 
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onHorizontalDragStart: widget.enabled ? handleDragStart : null,
-      onHorizontalDragUpdate: widget.enabled ? handleDragUpdate : null,
-      onHorizontalDragEnd: widget.enabled ? handleDragEnd : null,
-      onHorizontalDragCancel: widget.enabled ? resetDrag : null,
+      onHorizontalDragStart: widget.enabled ? _handleDragStart : null,
+      onHorizontalDragUpdate: widget.enabled ? _handleDragUpdate : null,
+      onHorizontalDragEnd: widget.enabled ? _handleDragEnd : null,
+      onHorizontalDragCancel: widget.enabled ? _resetDrag : null,
       child: Stack(
         alignment: Alignment.center,
         children: [
@@ -98,7 +145,7 @@ class SwipeToReplyState extends State<SwipeToReply> {
             ),
           ),
           AnimatedContainer(
-            duration: dragging ? Duration.zero : widget.resetDuration,
+            duration: _dragging ? Duration.zero : widget.resetDuration,
             curve: widget.resetCurve,
             transform: Matrix4.translationValues(offset, 0, 0),
             child: widget.child,
@@ -108,52 +155,66 @@ class SwipeToReplyState extends State<SwipeToReply> {
     );
   }
 
-  void handleDragStart(DragStartDetails details) {
-    dragging = true;
-    didTriggerHaptic = false;
+  void _handleDragStart(DragStartDetails details) {
+    _dragging = true;
+    _didTriggerHaptic = false;
   }
 
-  void handleDragUpdate(DragUpdateDetails details) {
+  void _handleDragUpdate(DragUpdateDetails details) {
     final delta = details.primaryDelta ?? 0;
     final directionalDelta = delta * widget.direction.multiplier;
-    final nextDistance = (dragDistance + directionalDelta).clamp(
+    final nextDistance = (_dragDistance + directionalDelta).clamp(
       0.0,
       widget.maxDragDistance,
     );
 
-    if (nextDistance == dragDistance) return;
+    if (nextDistance == _dragDistance) return;
 
-    setState(() => dragDistance = nextDistance);
+    setState(() => _dragDistance = nextDistance);
 
-    if (!didTriggerHaptic && dragDistance >= widget.triggerDistance) {
-      didTriggerHaptic = true;
+    if (_didTriggerHaptic && _dragDistance <= widget.hapticRearmDistance) {
+      _didTriggerHaptic = false;
+    }
+
+    if (!_didTriggerHaptic && _dragDistance >= widget.triggerDistance) {
+      _didTriggerHaptic = true;
       if (widget.enableHapticFeedback) HapticFeedback.lightImpact();
     }
   }
 
-  void handleDragEnd(DragEndDetails details) {
-    final shouldReply = dragDistance >= widget.triggerDistance;
-    resetDrag();
+  void _handleDragEnd(DragEndDetails details) {
+    final shouldReply = _dragDistance >= widget.triggerDistance;
+    _resetDrag();
 
     if (shouldReply) widget.onReply();
   }
 
-  void resetDrag() {
+  void _resetDrag() {
     if (!mounted) return;
 
     setState(() {
-      dragging = false;
-      dragDistance = 0;
-      didTriggerHaptic = false;
+      _dragging = false;
+      _dragDistance = 0;
+      _didTriggerHaptic = false;
     });
   }
 }
 
+/// The default circular, theme-aware indicator used by [SwipeToReply].
 class SwipeToReplyIndicator extends StatelessWidget {
+  /// Reveal progress between `0` and `1`.
   final double progress;
+
+  /// Diameter of the circular indicator.
   final double size;
+
+  /// Space around the indicator.
   final EdgeInsetsGeometry margin;
+
+  /// Fill color, or `null` to use the current theme.
   final Color? backgroundColor;
+
+  /// Widget displayed in the center of the indicator.
   final Widget icon;
 
   /// Default theme-aware reply indicator used by [SwipeToReply].
